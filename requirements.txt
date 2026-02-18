@@ -1,0 +1,12 @@
+fastapi
+uvicorn
+sqlalchemy
+chromadb
+sentence-transformers
+transformers
+torch
+pillow
+huggingface_hub
+python-dotenv
+python-multipart
+numpy
