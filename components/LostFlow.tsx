@@ -1,0 +1,375 @@
+import React, { useState, useRef, useEffect } from "react";
+import { motion, AnimatePresence } from "framer-motion";
+import { ArrowLeft, Send, Sparkles, Tag, AlertCircle } from "lucide-react";
+import { AppState, ChatMessage, LostItemProfile } from "../types";
+import { generateDetectiveResponse } from "../services/geminiService";
+import { Button } from "./ui/Button";
+
+interface LostFlowProps {
+  setAppState: (state: AppState) => void;
+}
+
+export const LostFlow: React.FC<LostFlowProps> = ({ setAppState }) => {
+  const [messages, setMessages] = useState<ChatMessage[]>([
+    {
+      id: "intro",
+      sender: "ai",
+      text: "Detective Sherlock here. I'm sorry to hear something's gone missing. Let's trace your steps. What is it that you've lost?",
+      timestamp: Date.now(),
+    },
+  ]);
+  const [inputValue, setInputValue] = useState("");
+  const [isThinking, setIsThinking] = useState(false);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const [finalDescription, setFinalDescription] = useState<string | null>(null);
+  const handleFinalize = async () => {
+    try {
+      const res = await fetch("http://localhost:8000/api/detective/finalize", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          history: messages.map((m) => ({
+            role: m.sender === "user" ? "user" : "assistant",
+            content: m.text,
+          })),
+        }),
+      });
+
+      const data = await res.json();
+      setFinalDescription(data.final_description);
+    } catch (error) {
+      console.error("Finalize Error:", error);
+    }
+  };
+
+  // Profile State
+  const [profile, setProfile] = useState<LostItemProfile>({
+    category: "Unknown",
+    confidence: 10,
+    tags: [],
+    colorHex: "#cccccc",
+    lastSeen: "Unknown",
+  });
+
+  const scrollToBottom = () => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  };
+
+  useEffect(() => {
+    scrollToBottom();
+  }, [messages]);
+
+  const handleSendMessage = async () => {
+    if (!inputValue.trim()) return;
+
+    const userMsg: ChatMessage = {
+      id: Date.now().toString(),
+      sender: "user",
+      text: inputValue,
+      timestamp: Date.now(),
+    };
+
+    setMessages((prev) => [...prev, userMsg]);
+    setInputValue("");
+    setIsThinking(true);
+
+    // AI Processing
+    const history = messages.map((m) => ({ role: m.sender, content: m.text }));
+    const response = await generateDetectiveResponse(history, userMsg.text);
+
+    setIsThinking(false);
+
+    // Update AI Message
+    const aiMsg: ChatMessage = {
+      id: (Date.now() + 1).toString(),
+      sender: "ai",
+      text: response.text,
+      timestamp: Date.now(),
+    };
+    setMessages((prev) => [...prev, aiMsg]);
+
+    // Update Profile visuals
+    setProfile((prev) => ({
+      ...prev,
+      confidence: Math.min(100, prev.confidence + response.confidenceDelta),
+      tags: [...new Set([...prev.tags, ...response.tags])],
+    }));
+  };
+  const handleSubmitLost = async () => {
+  const formData = new FormData();
+  formData.append("description", finalDescription || "");
+
+  await fetch("http://localhost:8000/lost/", {
+    method: "POST",
+    body: formData
+  });
+
+  alert("Case filed successfully.");
+};
+
+
+  return (
+    <div className="w-full h-screen flex flex-col md:flex-row bg-[#f4f1ea] relative overflow-hidden">
+      {/* LEFT: The Detective's Desk (Chat) */}
+      <div className="w-full md:w-1/2 h-full flex flex-col p-4 md:p-8 border-r-2 border-[#2d2d2d] relative z-10">
+        <div className="mb-6 flex items-center justify-between">
+          <button
+            onClick={() => setAppState(AppState.LANDING)}
+            className="flex items-center text-[#2d2d2d] hover:underline font-bold"
+          >
+            <ArrowLeft size={20} className="mr-2" />
+            Case Files
+          </button>
+          <div className="bg-[#2d2d2d] text-[#f4f1ea] px-3 py-1 rounded-sm font-display text-xs tracking-widest uppercase">
+            Active Investigation
+          </div>
+        </div>
+
+        {/* Chat Area */}
+        <div className="flex-1 overflow-y-auto pr-2 space-y-6">
+          {messages.map((msg) => (
+            <motion.div
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              key={msg.id}
+              className={`flex ${msg.sender === "user" ? "justify-end" : "justify-start"}`}
+            >
+              <div
+                className={`max-w-[80%] p-4 paper-shadow-sm border border-[#2d2d2d] relative ${
+                  msg.sender === "user"
+                    ? "bg-[#e07a5f] text-white rotate-1 rounded-tl-xl rounded-br-xl rounded-bl-xl"
+                    : "bg-white text-[#2d2d2d] -rotate-1 rounded-tr-xl rounded-br-xl rounded-bl-xl"
+                }`}
+              >
+                {msg.sender === "ai" && (
+                  <div className="absolute -top-3 -left-3 bg-[#2d2d2d] text-white p-1 rounded-full border border-white">
+                    <Sparkles size={12} />
+                  </div>
+                )}
+                <p className="font-hand text-lg leading-relaxed">{msg.text}</p>
+              </div>
+            </motion.div>
+          ))}
+          {isThinking && (
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              className="flex justify-start"
+            >
+              <div className="bg-[#f0f0f0] p-3 rounded-lg flex space-x-2 items-center">
+                <div
+                  className="w-2 h-2 bg-[#2d2d2d] rounded-full animate-bounce"
+                  style={{ animationDelay: "0s" }}
+                ></div>
+                <div
+                  className="w-2 h-2 bg-[#2d2d2d] rounded-full animate-bounce"
+                  style={{ animationDelay: "0.2s" }}
+                ></div>
+                <div
+                  className="w-2 h-2 bg-[#2d2d2d] rounded-full animate-bounce"
+                  style={{ animationDelay: "0.4s" }}
+                ></div>
+              </div>
+            </motion.div>
+          )}
+          <div ref={messagesEndRef} />
+        </div>
+        {/* Finalize Button */}
+        {messages.filter((m) => m.sender === "user").length >= 2 &&
+          !finalDescription && (
+            <div className="mt-4 flex justify-center">
+              <button
+                onClick={handleFinalize}
+                className="bg-[#2d2d2d] text-[#f4f1ea] px-6 py-2 tracking-widest uppercase text-xs border border-[#2d2d2d] hover:bg-[#e07a5f] hover:border-[#e07a5f] transition-all"
+              >
+                Finalize Case File
+              </button>
+            </div>
+          )}
+        {finalDescription && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            className="mt-4 border border-[#2d2d2d] p-4 bg-[#f4f1ea]"
+          >
+            <h3 className="font-display uppercase tracking-widest text-xs mb-2">
+              Final Case Description
+            </h3>
+
+            <textarea
+              value={finalDescription}
+              onChange={(e) => setFinalDescription(e.target.value)}
+              className="w-full p-3 border border-[#2d2d2d] bg-white font-hand text-lg focus:outline-none"
+              rows={4}
+            />
+
+            <div className="flex justify-between mt-3">
+              <button
+                onClick={() => setFinalDescription(null)}
+                className="text-sm underline"
+              >
+                Edit Investigation
+              </button>
+
+              <button
+                onClick={handleSubmitLost}
+                className="bg-[#e07a5f] text-white px-5 py-2 uppercase text-xs tracking-widest hover:bg-[#d65f44]"
+              >
+                Confirm & Submit
+              </button>
+            </div>
+          </motion.div>
+        )}
+
+        {/* Input Area */}
+        <div className="mt-6 relative">
+          <input
+            type="text"
+            value={inputValue}
+            onChange={(e) => setInputValue(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && handleSendMessage()}
+            placeholder="Type your answer..."
+            className="w-full bg-transparent border-b-2 border-[#2d2d2d] p-4 pr-12 font-display text-xl focus:outline-none focus:border-[#e07a5f] transition-colors"
+            autoFocus
+          />
+          <button
+            onClick={handleSendMessage}
+            className="absolute right-2 top-1/2 -translate-y-1/2 text-[#2d2d2d] hover:text-[#e07a5f] transition-colors"
+          >
+            <Send size={24} />
+          </button>
+        </div>
+      </div>
+
+      {/* RIGHT: The Evidence Board (Dynamic Profile) */}
+      <div className="w-full md:w-1/2 h-full bg-[#e8e4db] p-8 relative overflow-hidden">
+        {/* Background pattern for the board */}
+        <div
+          className="absolute inset-0 opacity-5 pointer-events-none"
+          style={{
+            backgroundImage: "radial-gradient(#2d2d2d 1px, transparent 1px)",
+            backgroundSize: "20px 20px",
+          }}
+        ></div>
+
+        <div className="max-w-md mx-auto h-full flex flex-col justify-center space-y-8 relative z-10">
+          {/* Header */}
+          <div className="text-center">
+            <h3 className="font-display font-bold text-2xl uppercase tracking-widest mb-2 border-b-4 border-[#2d2d2d] inline-block pb-1">
+              Subject Profile
+            </h3>
+          </div>
+
+          {/* Visualizer Frame */}
+          <motion.div
+            className="w-full aspect-square bg-white paper-shadow border-2 border-[#2d2d2d] p-4 relative flex items-center justify-center overflow-hidden group"
+            layout
+          >
+            <div
+              className="absolute top-2 left-1/2 -translate-x-1/2 w-24 h-6 bg-[#d4c5a3] opacity-80 z-20 shadow-sm"
+              style={{ transform: "rotate(-2deg)" }}
+            ></div>{" "}
+            {/* Tape */}
+            {/* The "Generated" Sketch Area */}
+            <div className="w-full h-full border border-dashed border-gray-300 rounded-sm flex items-center justify-center relative">
+              {profile.tags.length === 0 ? (
+                <span className="font-hand text-gray-400 text-2xl -rotate-6">
+                  Awaiting details...
+                </span>
+              ) : (
+                <div className="relative w-3/4 h-3/4">
+                  {/* Abstract representation of the item based on tags */}
+                  <motion.div
+                    className="w-full h-full bg-[#f0f0f0] rounded-lg border-2 border-[#2d2d2d] flex items-center justify-center"
+                    initial={{ scale: 0.8, opacity: 0 }}
+                    animate={{ scale: 1, opacity: 1 }}
+                  >
+                    <span className="font-display font-bold text-4xl text-[#2d2d2d] opacity-20 uppercase">
+                      {profile.tags[0] || "?"}
+                    </span>
+                  </motion.div>
+
+                  {/* Stickers for tags */}
+                  {profile.tags.map((tag, i) => (
+                    <motion.div
+                      key={tag}
+                      initial={{ scale: 0, rotate: 0 }}
+                      animate={{
+                        scale: 1,
+                        rotate: (i % 2 === 0 ? 10 : -10) + i * 5,
+                      }}
+                      className="absolute bg-[#e07a5f] text-white px-2 py-1 font-bold font-hand text-sm border border-[#2d2d2d] paper-shadow-sm"
+                      style={{
+                        top: `${20 + i * 15}%`,
+                        right: `${-10 + i * 5}%`,
+                        zIndex: 10 + i,
+                      }}
+                    >
+                      {tag}
+                    </motion.div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </motion.div>
+
+          {/* Stats & Confidence */}
+          <div className="space-y-4">
+            <div className="flex justify-between items-end">
+              <span className="font-display font-bold text-lg">
+                Recovery Probability
+              </span>
+              <span className="font-display font-bold text-3xl text-[#e07a5f]">
+                {profile.confidence}%
+              </span>
+            </div>
+
+            {/* Custom Progress Bar */}
+            <div className="w-full h-6 border-2 border-[#2d2d2d] p-1 bg-white rounded-full">
+              <motion.div
+                className="h-full bg-gradient-to-r from-[#81b29a] to-[#e07a5f] rounded-full border border-[#2d2d2d]"
+                initial={{ width: "10%" }}
+                animate={{ width: `${profile.confidence}%` }}
+              />
+            </div>
+
+            <div className="flex flex-wrap gap-2 pt-2">
+              <span className="flex items-center text-sm font-bold text-[#2d2d2d]">
+                <Tag size={16} className="mr-1" />
+                Identified Traits:
+              </span>
+              {profile.tags.length === 0 && (
+                <span className="text-gray-400 font-hand text-sm">
+                  None yet
+                </span>
+              )}
+              {profile.tags.map((tag) => (
+                <span
+                  key={tag}
+                  className="bg-[#f4f1ea] border border-[#2d2d2d] px-2 py-0.5 text-xs font-mono rounded-sm"
+                >
+                  #{tag}
+                </span>
+              ))}
+            </div>
+          </div>
+
+          {/* Action */}
+          {profile.confidence > 60 && (
+            <motion.div
+              initial={{ y: 20, opacity: 0 }}
+              animate={{ y: 0, opacity: 1 }}
+            >
+              <Button
+                className="w-full"
+                onClick={() => setAppState(AppState.VERIFICATION)}
+              >
+                Match Found in Archive
+              </Button>
+            </motion.div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+};

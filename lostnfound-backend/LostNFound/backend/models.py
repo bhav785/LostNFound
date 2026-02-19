@@ -1,5 +1,6 @@
+from pydantic import BaseModel
 from sqlalchemy import Column, Integer, String
-from backend.database import Base
+from database import Base
 
 
 class LostItem(Base):
@@ -16,3 +17,11 @@ class FoundItem(Base):
     id = Column(Integer, primary_key=True, index=True)
     caption = Column(String)
     image_path = Column(String)
+
+class DetectiveRequest(BaseModel):
+    history: list
+    userInput: str
+
+
+class FinalizeRequest(BaseModel):
+    history: list
