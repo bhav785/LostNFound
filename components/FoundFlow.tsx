@@ -18,9 +18,13 @@ interface FoundFlowProps {
 export const FoundFlow: React.FC<FoundFlowProps> = ({ setAppState }) => {
   const [step, setStep] = useState(1);
   const [dragActive, setDragActive] = useState(false);
-  const [selectedFile, setSelectedFile] = useState(null);
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [location, setLocation] = useState("");
+  const [condition, setCondition] = useState("");
+  const [loading, setLoading] = useState(false);
   const [result, setResult] = useState(null);
-  const fileInputRef = useRef(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const handleDrag = (e: React.DragEvent) => {
     e.preventDefault();
@@ -32,11 +36,14 @@ export const FoundFlow: React.FC<FoundFlowProps> = ({ setAppState }) => {
     }
   };
 
-  const handleDrop = (e) => {
+  const handleDrop = (e: React.DragEvent) => {
     e.preventDefault();
     const file = e.dataTransfer.files[0];
-    setSelectedFile(file);
-    setStep(2);
+    if (file) {
+      setSelectedFile(file);
+      setPreviewUrl(URL.createObjectURL(file));
+      setStep(2);
+    }
   };
   const handleSubmit = async () => {
     if (!selectedFile) {
@@ -44,11 +51,15 @@ export const FoundFlow: React.FC<FoundFlowProps> = ({ setAppState }) => {
       return;
     }
 
+    setLoading(true);
     const formData = new FormData();
     formData.append("file", selectedFile);
+    formData.append("location", location);
+    formData.append("condition", condition);
 
+    const baseUrl = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
     try {
-      const response = await fetch("http://localhost:8000/found/", {
+      const response = await fetch(`${baseUrl}/found/`, {
         method: "POST",
         body: formData,
       });
@@ -57,9 +68,15 @@ export const FoundFlow: React.FC<FoundFlowProps> = ({ setAppState }) => {
       console.log(data);
 
       setResult(data);
+      if (data.match_found) {
+        alert(" Sherlock found a match for this item in the database!");
+      }
       setStep(3);
     } catch (error) {
       console.error("Upload failed:", error);
+      alert("Upload failed. Please try again.");
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -100,11 +117,10 @@ export const FoundFlow: React.FC<FoundFlowProps> = ({ setAppState }) => {
 
           {step === 1 && (
             <div
-              className={`relative w-full h-80 border-4 border-dashed rounded-lg flex flex-col items-center justify-center transition-all cursor-pointer group ${
-                dragActive
-                  ? "border-[#e07a5f] bg-[#e07a5f]/10"
-                  : "border-[#5c5c5c] hover:border-[#f4f1ea]"
-              }`}
+              className={`relative w-full h-80 border-4 border-dashed rounded-lg flex flex-col items-center justify-center transition-all cursor-pointer group ${dragActive
+                ? "border-[#e07a5f] bg-[#e07a5f]/10"
+                : "border-[#5c5c5c] hover:border-[#f4f1ea]"
+                }`}
               onDragEnter={handleDrag}
               onDragLeave={handleDrag}
               onDragOver={handleDrag}
@@ -128,6 +144,7 @@ export const FoundFlow: React.FC<FoundFlowProps> = ({ setAppState }) => {
                   const file = e.target.files[0];
                   if (file) {
                     setSelectedFile(file);
+                    setPreviewUrl(URL.createObjectURL(file));
                     setStep(2);
                   }
                 }}
@@ -160,17 +177,26 @@ export const FoundFlow: React.FC<FoundFlowProps> = ({ setAppState }) => {
                     <MapPin size={20} className="text-gray-400 mr-2" />
                     <input
                       type="text"
+                      value={location}
+                      onChange={(e) => setLocation(e.target.value)}
                       placeholder="e.g. Central Park Bench"
                       className="bg-transparent w-full outline-none text-[#f4f1ea] font-hand text-lg"
                     />
                   </div>
                 </div>
                 <div>
+                  {previewUrl && (
+                    <div className="mb-4 rounded-sm overflow-hidden border border-[#5c5c5c]">
+                      <img src={previewUrl} alt="Preview" className="w-full h-48 object-cover" />
+                    </div>
+                  )}
                   <label className="block font-display font-bold text-sm uppercase mb-2 text-[#e07a5f]">
                     Condition Notes
                   </label>
                   <textarea
                     rows={3}
+                    value={condition}
+                    onChange={(e) => setCondition(e.target.value)}
                     className="w-full bg-[#2d2d2d] border border-[#5c5c5c] p-3 rounded-sm outline-none text-[#f4f1ea] font-hand text-lg"
                     placeholder="Any scratches? Wet? Damaged?"
                   ></textarea>
@@ -179,8 +205,9 @@ export const FoundFlow: React.FC<FoundFlowProps> = ({ setAppState }) => {
                   variant="accent"
                   className="w-full"
                   onClick={handleSubmit}
+                  disabled={loading}
                 >
-                  Log Into Archive
+                  {loading ? "Processing Evidence..." : "Log Into Archive"}
                 </Button>
               </div>
             </motion.div>

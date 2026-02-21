@@ -10,6 +10,12 @@ import { Footer } from './components/Footer';
 const App: React.FC = () => {
   const [appState, setAppState] = useState<AppState>(AppState.LANDING);
 
+  React.useEffect(() => {
+    if (window.location.pathname.startsWith('/verify/')) {
+      setAppState(AppState.VERIFICATION);
+    }
+  }, []);
+
   return (
     <div className="min-h-screen flex flex-col">
       <AnimatePresence mode='wait'>
@@ -18,12 +24,12 @@ const App: React.FC = () => {
             <Landing setAppState={setAppState} />
           </motion.div>
         )}
-        
+
         {appState === AppState.LOST_FLOW && (
-          <motion.div 
-            key="lost" 
-            initial={{ opacity: 0, x: 100 }} 
-            animate={{ opacity: 1, x: 0 }} 
+          <motion.div
+            key="lost"
+            initial={{ opacity: 0, x: 100 }}
+            animate={{ opacity: 1, x: 0 }}
             exit={{ opacity: 0, x: -100 }}
             className="flex-1"
           >
@@ -32,10 +38,10 @@ const App: React.FC = () => {
         )}
 
         {appState === AppState.FOUND_FLOW && (
-          <motion.div 
-            key="found" 
-            initial={{ opacity: 0, x: -100 }} 
-            animate={{ opacity: 1, x: 0 }} 
+          <motion.div
+            key="found"
+            initial={{ opacity: 0, x: -100 }}
+            animate={{ opacity: 1, x: 0 }}
             exit={{ opacity: 0, x: 100 }}
             className="flex-1"
           >
@@ -44,10 +50,10 @@ const App: React.FC = () => {
         )}
 
         {appState === AppState.VERIFICATION && (
-          <motion.div 
-            key="verify" 
-            initial={{ opacity: 0, scale: 0.9 }} 
-            animate={{ opacity: 1, scale: 1 }} 
+          <motion.div
+            key="verify"
+            initial={{ opacity: 0, scale: 0.9 }}
+            animate={{ opacity: 1, scale: 1 }}
             exit={{ opacity: 0 }}
             className="flex-1"
           >

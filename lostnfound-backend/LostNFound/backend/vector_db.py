@@ -6,19 +6,23 @@ client = chromadb.Client(Settings(
     is_persistent=True
 ))
 
-collection = client.get_or_create_collection(name="lost_items")
+lost_collection = client.get_or_create_collection(name="lost_items")
+found_collection = client.get_or_create_collection(name="found_items")
 
 
-def add_to_vector_db(item_id, embedding):
-    collection.add(
+def add_to_vector_db(item_id, embedding, is_lost=True):
+    col = lost_collection if is_lost else found_collection
+    col.add(
         ids=[str(item_id)],
-        embeddings=[embedding]
+        embeddings=[embedding],
+        metadatas=[{"type": "lost" if is_lost else "found"}]
     )
 
 
-def search_vector_db(query_embedding):
-    results = collection.query(
+def search_vector_db(query_embedding, search_lost=True):
+    col = lost_collection if search_lost else found_collection
+    results = col.query(
         query_embeddings=[query_embedding],
-        n_results=1
+        n_results=5
     )
     return results

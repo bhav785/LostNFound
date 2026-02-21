@@ -3,8 +3,9 @@ export const generateDetectiveResponse = async (
   userInput: string
 ): Promise<{ text: string; tags: string[]; confidenceDelta: number }> => {
 
+  const baseUrl = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
   try {
-    const response = await fetch("http://localhost:8000/api/detective", {
+    const response = await fetch(`${baseUrl}/api/detective`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json"

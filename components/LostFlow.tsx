@@ -21,10 +21,16 @@ export const LostFlow: React.FC<LostFlowProps> = ({ setAppState }) => {
   const [inputValue, setInputValue] = useState("");
   const [isThinking, setIsThinking] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const [loading, setLoading] = useState(false);
   const [finalDescription, setFinalDescription] = useState<string | null>(null);
+  const [email, setEmail] = useState("");
+  const [showEmailPrompt, setShowEmailPrompt] = useState(false);
+
+  const baseUrl = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
   const handleFinalize = async () => {
+    setLoading(true);
     try {
-      const res = await fetch("http://localhost:8000/api/detective/finalize", {
+      const res = await fetch(`${baseUrl}/api/detective/finalize`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -40,6 +46,7 @@ export const LostFlow: React.FC<LostFlowProps> = ({ setAppState }) => {
     } catch (error) {
       console.error("Finalize Error:", error);
     }
+    setLoading(false);
   };
 
   // Profile State
@@ -74,7 +81,10 @@ export const LostFlow: React.FC<LostFlowProps> = ({ setAppState }) => {
     setIsThinking(true);
 
     // AI Processing
-    const history = messages.map((m) => ({ role: m.sender, content: m.text }));
+    const history = messages.map((m) => ({
+      role: m.sender === "ai" ? "assistant" : "user",
+      content: m.text,
+    }));
     const response = await generateDetectiveResponse(history, userMsg.text);
 
     setIsThinking(false);
@@ -96,17 +106,48 @@ export const LostFlow: React.FC<LostFlowProps> = ({ setAppState }) => {
     }));
   };
   const handleSubmitLost = async () => {
-  const formData = new FormData();
-  formData.append("description", finalDescription || "");
+    if (!finalDescription || !email) {
+      alert("Please provide both a description and an email.");
+      return;
+    }
 
-  await fetch("http://localhost:8000/lost/", {
-    method: "POST",
-    body: formData
-  });
+    setLoading(true);
+    try {
+      const formData = new FormData();
+      formData.append("description", finalDescription);
+      formData.append("email", email);
 
-  alert("Case filed successfully.");
-};
+      const res = await fetch(`${baseUrl}/lost/`, {
+        method: "POST",
+        body: formData,
+      });
 
+      const data = await res.json();
+
+      if (data.success) {
+        setProfile((prev) => ({
+          ...prev,
+          generatedImage: data.image_url,
+          confidence: 100,
+        }));
+
+        if (data.match_found) {
+          alert("Detective Sherlock found a potential match! Check your email.");
+        } else {
+          alert("Case successfully filed. We'll notify you if a match is found.");
+        }
+
+        setShowEmailPrompt(false);
+      } else {
+        alert(" Something went wrong: " + data.message);
+      }
+    } catch (error) {
+      console.error("Submit Lost Error:", error);
+      alert(" Server error. Please try again.");
+    } finally {
+      setLoading(false);
+    }
+  };
 
   return (
     <div className="w-full h-screen flex flex-col md:flex-row bg-[#f4f1ea] relative overflow-hidden">
@@ -135,11 +176,10 @@ export const LostFlow: React.FC<LostFlowProps> = ({ setAppState }) => {
               className={`flex ${msg.sender === "user" ? "justify-end" : "justify-start"}`}
             >
               <div
-                className={`max-w-[80%] p-4 paper-shadow-sm border border-[#2d2d2d] relative ${
-                  msg.sender === "user"
+                className={`max-w-[80%] p-4 paper-shadow-sm border border-[#2d2d2d] relative ${msg.sender === "user"
                     ? "bg-[#e07a5f] text-white rotate-1 rounded-tl-xl rounded-br-xl rounded-bl-xl"
                     : "bg-white text-[#2d2d2d] -rotate-1 rounded-tr-xl rounded-br-xl rounded-bl-xl"
-                }`}
+                  }`}
               >
                 {msg.sender === "ai" && (
                   <div className="absolute -top-3 -left-3 bg-[#2d2d2d] text-white p-1 rounded-full border border-white">
@@ -186,7 +226,8 @@ export const LostFlow: React.FC<LostFlowProps> = ({ setAppState }) => {
               </button>
             </div>
           )}
-        {finalDescription && (
+
+        {finalDescription && !showEmailPrompt && (
           <motion.div
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
@@ -202,7 +243,6 @@ export const LostFlow: React.FC<LostFlowProps> = ({ setAppState }) => {
               className="w-full p-3 border border-[#2d2d2d] bg-white font-hand text-lg focus:outline-none"
               rows={4}
             />
-
             <div className="flex justify-between mt-3">
               <button
                 onClick={() => setFinalDescription(null)}
@@ -212,11 +252,48 @@ export const LostFlow: React.FC<LostFlowProps> = ({ setAppState }) => {
               </button>
 
               <button
-                onClick={handleSubmitLost}
+                onClick={() => setShowEmailPrompt(true)}
                 className="bg-[#e07a5f] text-white px-5 py-2 uppercase text-xs tracking-widest hover:bg-[#d65f44]"
               >
-                Confirm & Submit
+                Next Step: Contact Info
               </button>
+            </div>
+          </motion.div>
+        )}
+
+        {showEmailPrompt && (
+          <motion.div
+            initial={{ opacity: 0, scale: 0.95 }}
+            animate={{ opacity: 1, scale: 1 }}
+            className="mt-4 border-2 border-[#e07a5f] p-6 bg-white rotate-1"
+          >
+            <h3 className="font-display uppercase tracking-widest text-sm mb-4 font-bold border-b border-[#2d2d2d] pb-2">
+              Where should we send updates?
+            </h3>
+            <div className="space-y-4">
+              <input
+                type="email"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                placeholder="Enter your email address"
+                className="w-full p-3 border border-[#2d2d2d] font-hand text-lg"
+                autoFocus
+              />
+              <div className="flex justify-between">
+                <button
+                  onClick={() => setShowEmailPrompt(false)}
+                  className="text-sm underline"
+                >
+                  Back
+                </button>
+                <button
+                  onClick={handleSubmitLost}
+                  disabled={loading || !email}
+                  className="bg-[#2d2d2d] text-white px-6 py-2 uppercase text-xs tracking-widest disabled:opacity-50"
+                >
+                  {loading ? "Filing Case..." : "File Final Report"}
+                </button>
+              </div>
             </div>
           </motion.div>
         )}
@@ -279,15 +356,26 @@ export const LostFlow: React.FC<LostFlowProps> = ({ setAppState }) => {
               ) : (
                 <div className="relative w-3/4 h-3/4">
                   {/* Abstract representation of the item based on tags */}
-                  <motion.div
-                    className="w-full h-full bg-[#f0f0f0] rounded-lg border-2 border-[#2d2d2d] flex items-center justify-center"
-                    initial={{ scale: 0.8, opacity: 0 }}
-                    animate={{ scale: 1, opacity: 1 }}
-                  >
-                    <span className="font-display font-bold text-4xl text-[#2d2d2d] opacity-20 uppercase">
-                      {profile.tags[0] || "?"}
-                    </span>
-                  </motion.div>
+                  {profile.generatedImage ? (
+                    <motion.img
+                      src={profile.generatedImage}
+                      alt="Generated Lost Item"
+                      className="w-full h-full object-contain rounded-lg border-2 border-[#2d2d2d]"
+                      initial={{ opacity: 0, scale: 0.9 }}
+                      animate={{ opacity: 1, scale: 1 }}
+                      transition={{ duration: 0.4 }}
+                    />
+                  ) : (
+                    <motion.div
+                      className="w-full h-full bg-[#f0f0f0] rounded-lg border-2 border-[#2d2d2d] flex items-center justify-center"
+                      initial={{ scale: 0.8, opacity: 0 }}
+                      animate={{ scale: 1, opacity: 1 }}
+                    >
+                      <span className="font-display font-bold text-4xl text-[#2d2d2d] opacity-20 uppercase">
+                        {profile.tags[0] || "?"}
+                      </span>
+                    </motion.div>
+                  )}
 
                   {/* Stickers for tags */}
                   {profile.tags.map((tag, i) => (
