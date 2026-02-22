@@ -168,7 +168,7 @@ def check_for_matches(item_id, embedding, is_lost=True):
             matched_id = int(results["ids"][0][i])
             similarity = 1 - distance
             
-            if similarity >= 0.75:
+            if similarity >= 0.6:
                 # We have a potential match!
                 if is_lost:
                     # We just added a lost item, matched_id is a found item
@@ -382,6 +382,11 @@ def finalize_description(data: FinalizeRequest):
     try:
         history = data.history
 
+        if not history:
+            print("Finalize Debug: No history received.")
+            return {"final_description": "No conversation data provided."}
+
+        # ===== SYSTEM PROMPT =====
         system_prompt = """
 You are generating a final structured item description.
 
@@ -389,7 +394,7 @@ Based ONLY on information mentioned in the conversation,
 write a detailed physical description of the lost item.
 
 Include:
-- Category 
+- Category
 - Color
 - Material (if mentioned)
 - Shape (if mentioned)
@@ -400,14 +405,29 @@ Do NOT invent details.
 Return only the description paragraph.
 """
 
-        messages = [{"role": "system", "content": system_prompt}]
+        # ===== Convert Entire Conversation To ONE User Message =====
+        conversation_text = ""
 
-        for h in history[-4:]:
-            messages.append({
-                "role": h["role"],
-                "content": h["content"]
-            })
+        for h in history:
+            role = h.get("role", "")
+            content = h.get("content", "")
 
+            print(f"History -> Role: {role}, Content: {content}")
+
+            conversation_text += f"{role.upper()}: {content}\n"
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {
+                "role": "user",
+                "content": f"Here is the conversation:\n\n{conversation_text}\n\nGenerate the final structured description."
+            }
+        ]
+
+        print("Messages Sent To OpenRouter:")
+        print(messages)
+
+        # ===== API CALL =====
         response = requests.post(
             "https://openrouter.ai/api/v1/chat/completions",
             headers={
@@ -415,31 +435,42 @@ Return only the description paragraph.
                 "Content-Type": "application/json"
             },
             json={
-                "model":"mistralai/mistral-7b-instruct",
+                "model": "mistralai/mistral-7b-instruct",
                 "messages": messages,
-                "temperature": 0.3,
-                "max_tokens": 150
+                "temperature": 0.5,
+                "max_tokens": 200
             },
-            timeout=20
+            timeout=30
         )
 
+        print("OpenRouter Status Code:", response.status_code)
+
         if response.status_code != 200:
-            print("HTTP Error:", response.status_code, response.text)
+            print("OpenRouter HTTP Error:", response.text)
             return {"final_description": "AI service error. Try again."}
 
         result = response.json()
-        print("OpenRouter response:", result)
+        print("OpenRouter Raw Response:", result)
 
-        if "choices" not in result:
-            print("OpenRouter returned error:", result)
+        if "choices" not in result or not result["choices"]:
+            print("Invalid OpenRouter response structure.")
             return {"final_description": "AI temporarily unavailable."}
 
-        final_text = result["choices"][0]["message"]["content"].strip()
+        final_text = result["choices"][0]["message"]["content"]
+
+        if final_text:
+            final_text = final_text.strip()
+
+        if not final_text:
+            print("Model returned empty content.")
+            final_text = "Description could not be generated. Please try again."
+
+        print("Final Description Generated:", final_text)
 
         return {"final_description": final_text}
 
     except Exception as e:
-        print("Finalize Error:", e)
+        print("Finalize Endpoint Error:", str(e))
         return {"final_description": "Something went wrong."}
 
 
