@@ -1,5 +1,7 @@
+from typing import List, Optional
+
 from pydantic import BaseModel
-from sqlalchemy import Column, Integer, String
+from sqlalchemy import Column, Integer, String, Float, JSON
 from database import Base
 
 
@@ -34,10 +36,22 @@ class Match(Base):
     created_at = Column(String)
     verified = Column(Integer, default=0)
 
+class Verification(Base):
+    __tablename__ = "verifications"
+    id = Column(Integer, primary_key=True, index=True)
+    match_id = Column(Integer)
+    confidence_score = Column(Float, default=0.0)
+    status = Column(String, default="PENDING") # PENDING, VERIFIED, MANUAL_REVIEW, FAILED
+    proof_files = Column(JSON, default=[]) # List of file paths
+    questions_json = Column(JSON, default=[]) # Dynamic questions and answers
+    attempt_count = Column(Integer, default=0)
+    verification_timestamp = Column(String, nullable=True)
+    qr_code_path = Column(String, nullable=True)
+
 class DetectiveRequest(BaseModel):
     history: list
     userInput: str
 
 
 class FinalizeRequest(BaseModel):
-    history: list
+    history: Optional[List[dict]] = []

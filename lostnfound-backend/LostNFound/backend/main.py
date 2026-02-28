@@ -1,7 +1,8 @@
 import os
+import time
 from fastapi import FastAPI, UploadFile, File, Form
 from database import Base, engine, SessionLocal
-from models import LostItem, FoundItem, DetectiveRequest, FinalizeRequest, Match
+from models import LostItem, FoundItem, DetectiveRequest, FinalizeRequest, Match, Verification
 from image_generation import generate_lost_item_image
 from caption import generate_caption    
 from embedding import get_combined_embedding
@@ -16,6 +17,11 @@ from datetime import datetime
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+from fraud_service import generate_verification_questions, calculate_confidence_score
+from qr_utility import generate_signed_qr
+import uuid
+import shutil
+from fastapi import HTTPException
 
 
 from dotenv import load_dotenv
@@ -39,6 +45,13 @@ app.mount("/generated_images", StaticFiles(directory=IMAGE_DIR), name="generated
 UPLOAD_DIR = os.path.join(BASE_DIR, "uploaded_images")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 app.mount("/uploaded_images", StaticFiles(directory=UPLOAD_DIR), name="uploaded_images")
+
+VERIFICATION_DIR = os.path.join(UPLOAD_DIR, "verification")
+os.makedirs(VERIFICATION_DIR, exist_ok=True)
+
+QR_DIR = os.path.join(BASE_DIR, "qr_codes")
+os.makedirs(QR_DIR, exist_ok=True)
+app.mount("/qr_codes", StaticFiles(directory=QR_DIR), name="qr_codes")
 
 
 DISTANCE_THRESHOLD = 0.25  # lower = more similar
@@ -260,7 +273,138 @@ def send_match_email(to_email, lost_item, found_item, match_id):
     except Exception as e:
         print(f"Failed to send email: {e}")
 
+@app.get("/api/verify/start/{match_id}")
+def start_verification(match_id: int):
+    db = SessionLocal()
+    match = db.query(Match).filter(Match.id == match_id).first()
+    if not match:
+        db.close()
+        return {"success": False, "message": "Match not found"}
+    
+    # Check if verification already exists
+    verification = db.query(Verification).filter(Verification.match_id == match_id).first()
+    if not verification:
+        lost_item = db.query(LostItem).filter(LostItem.id == match.lost_item_id).first()
+        found_item = db.query(FoundItem).filter(FoundItem.id == match.found_item_id).first()
+        
+        # Generate dynamic questions
+        questions = generate_verification_questions(lost_item.description, found_item.caption)
+        
+        verification = Verification(
+            match_id=match_id,
+            questions_json=questions,
+            status="PENDING"
+        )
+        db.add(verification)
+        db.commit()
+        db.refresh(verification)
+    
+    db.close()
+    return {
+        "success": True,
+        "questions": verification.questions_json,
+        "status": verification.status
+    }
+
+@app.post("/api/verify/submit/{match_id}")
+def submit_verification(
+    match_id: int,
+    answers: str = Form(...),
+    item_proof: UploadFile = File(...),
+    selfie: UploadFile = File(...)
+):
+    db = SessionLocal()
+    match = db.query(Match).filter(Match.id == match_id).first()
+    verification = db.query(Verification).filter(Verification.match_id == match_id).first()
+    
+    if not match or not verification:
+        db.close()
+        return {"success": False, "message": "Verification session not found"}
+
+    if verification.status in ["VERIFIED", "FAILED"] and verification.attempt_count >= 3:
+        db.close()
+        return {"success": False, "message": "Maximum attempts reached"}
+
+    # Save files
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    proof_paths = []
+    
+    for file, prefix in [(item_proof, "proof"), (selfie, "selfie")]:
+        file_ext = os.path.splitext(file.filename)[1]
+        filename = f"{match_id}_{prefix}_{timestamp}{file_ext}"
+        file_path = os.path.join(VERIFICATION_DIR, filename)
+        with open(file_path, "wb") as f:
+            f.write(file.file.read())
+        proof_paths.append(file_path)
+
+    # Process answers
+    try:
+        user_answers = json.loads(answers)
+    except:
+        db.close()
+        return {"success": False, "message": "Invalid answers format"}
+
+    # Scoring
+    result = calculate_confidence_score(
+        user_answers, 
+        verification.questions_json, 
+        proof_paths, 
+        {}
+    )
+
+    verification.confidence_score = result["confidence_score"]
+    verification.status = result["status"]
+    verification.proof_files = proof_paths
+    verification.attempt_count += 1
+    verification.verification_timestamp = datetime.now().isoformat()
+
+    if verification.status == "VERIFIED":
+        # Generate QR
+        qr_filename, _ = generate_signed_qr(match.found_item_id, str(uuid.uuid4()), QR_DIR)
+        verification.qr_code_path = qr_filename
+        match.verified = 1
+
+    db.commit()
+    
+    res = {
+        "success": True,
+        "confidence_score": verification.confidence_score,
+        "status": verification.status,
+        "message": f"Verification {verification.status}"
+    }
+    
+    if verification.status == "VERIFIED":
+        res["qr_url"] = f"http://localhost:8000/qr_codes/{verification.qr_code_path}"
+
+    db.close()
+    return res
+
+@app.get("/api/verify/status/{match_id}")
+def get_verification_status(match_id: int):
+    db = SessionLocal()
+    verification = db.query(Verification).filter(Verification.match_id == match_id).first()
+    
+    if not verification:
+        db.close()
+        return {"success": False, "message": "No verification found"}
+    
+    res = {
+        "success": True,
+        "status": verification.status,
+        "confidence_score": verification.confidence_score
+    }
+    
+    if verification.qr_code_path:
+        res["qr_url"] = f"http://localhost:8000/qr_codes/{verification.qr_code_path}"
+    
+    db.close()
+    return res
+
 @app.get("/api/verify/{match_id}")
+def verify_match_legacy(match_id: int):
+    # This is the old endpoint, we can keep it as a shortcut or redirect
+    return verify_match(match_id)
+
 def verify_match(match_id: int):
     db = SessionLocal()
     match = db.query(Match).filter(Match.id == match_id).first()
@@ -294,13 +438,53 @@ def verify_match(match_id: int):
     return result
 
 
+def call_openrouter(payload, retries=3):
+    url = "https://openrouter.ai/api/v1/chat/completions"
+
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Content-Type": "application/json"
+    }
+
+    for attempt in range(retries):
+        try:
+            response = requests.post(
+                url,
+                headers=headers,
+                json=payload,
+                timeout=30
+            )
+
+            if response.status_code == 200:
+                return response.json()
+
+            # If model not available or provider error → retry
+            if response.status_code >= 500:
+                time.sleep(2 ** attempt)
+                continue
+
+            # For 4xx errors → stop immediately
+            raise HTTPException(
+                status_code=response.status_code,
+                detail=response.json()
+            )
+
+        except requests.exceptions.RequestException:
+            time.sleep(2 ** attempt)
+
+    raise HTTPException(status_code=500, detail="Model failed after retries")
+
+
+# -----------------------------
+# Main Endpoint
+# -----------------------------
 @app.post("/api/detective")
 def detective(data: DetectiveRequest):
-    try:
-        history = data.history or []
-        user_input = data.userInput or ""
 
-        system_prompt = """
+    history = data.history or []
+    user_input = data.userInput or ""
+
+    system_prompt = """
 You are Sherlock, a detective helping users describe lost items on lostNfound.
 
 Rules:
@@ -316,161 +500,286 @@ Respond ONLY in JSON:
 }
 """
 
-        conversation = "\n".join([h.get("content", "") for h in history])
+    # Merge system + conversation + user into ONE user message
+    conversation = "\n".join([h.get("content", "") for h in history])
 
-        response = requests.post(
-            "https://openrouter.ai/api/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-                "Content-Type": "application/json"
-            },
-            json={
-                "model": "mistralai/mistral-7b-instruct",
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": f"{conversation}\n{user_input}"}
-                ],
-                "temperature": 0.7,
-                "max_tokens": 200
-            },
-            timeout=30
+    combined_prompt = f"""
+{system_prompt}
+
+Conversation so far:
+{conversation}
+
+User:
+{user_input}
+"""
+
+    primary_model = "google/gemma-7b-it:free"
+    fallback_model = "openrouter/free"
+
+    payload = {
+        "model": primary_model,
+        "messages": [
+            {"role": "user", "content": combined_prompt}
+        ],
+        "temperature": 0.7,
+        "max_tokens": 200
+    }
+
+    # -----------------------------
+    # Try Primary Model
+    # -----------------------------
+    try:
+        result = call_openrouter(payload)
+    except:
+        # Fallback model
+        payload["model"] = fallback_model
+        result = call_openrouter(payload)
+
+    if "choices" not in result:
+        raise HTTPException(status_code=500, detail="Invalid LLM response")
+
+    content = result["choices"][0]["message"]["content"]
+
+    # Remove markdown JSON wrappers if present
+    cleaned = re.sub(r"```json|```", "", content).strip()
+
+    if not cleaned:
+        raise HTTPException(
+            status_code=500,
+            detail="Model returned empty response"
         )
 
-        result = response.json()
-        print("FULL RESPONSE:", result)
+    # Try to extract JSON block if model added extra text
+    json_match = re.search(r"\{.*\}", cleaned, re.DOTALL)
 
-        # Check for API failure
-        if response.status_code != 200:
-            return {
-                "error": "OpenRouter request failed",
-                "details": result
+    if not json_match:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error": "No JSON found in model response",
+                "raw_content": content
             }
+        )
 
-        if "choices" not in result:
-            return {
-                "error": "Invalid OpenRouter response",
-                "details": result
+    json_text = json_match.group()
+
+    try:
+        parsed = json.loads(json_text)
+        return parsed
+    except json.JSONDecodeError:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error": "Invalid JSON format from model",
+                "raw_content": content
             }
-
-        content = result["choices"][0]["message"]["content"]
-        print("RAW CONTENT:", content)
-
-        # Remove markdown wrapper
-        cleaned = re.sub(r"```json|```", "", content).strip()
-
-        try:
-            parsed = json.loads(cleaned)
-            return parsed
-        except json.JSONDecodeError as e:
-            return {
-                "error": "Model returned invalid JSON",
-                "raw_content": content,
-                "exception": str(e)
-            }
-
-    except Exception as e:
-        print("Detective Error:", e)
-        return {
-            "text": f"Backend error: {str(e)}",
-            "tags": [],
-            "confidenceDelta": 0
-        }
+        )
 
 
+#no api based description generation
 @app.post("/api/detective/finalize")
 def finalize_description(data: FinalizeRequest):
     try:
         history = data.history
 
         if not history:
-            print("Finalize Debug: No history received.")
             return {"final_description": "No conversation data provided."}
 
-        # ===== SYSTEM PROMPT =====
-        system_prompt = """
-You are generating a final structured item description.
-
-Based ONLY on information mentioned in the conversation,
-write a detailed physical description of the lost item.
-
-Include:
-- Category
-- Color
-- Material (if mentioned)
-- Shape (if mentioned)
-- Distinctive features (if mentioned)
-
-Do NOT ask questions.
-Do NOT invent details.
-Return only the description paragraph.
-"""
-
-        # ===== Convert Entire Conversation To ONE User Message =====
-        conversation_text = ""
-
+        # Collect only USER messages
+        user_text = ""
         for h in history:
-            role = h.get("role", "")
-            content = h.get("content", "")
+            if h.get("role") == "user":
+                user_text += h.get("content", "") + " "
 
-            print(f"History -> Role: {role}, Content: {content}")
+        user_text = user_text.strip()
 
-            conversation_text += f"{role.upper()}: {content}\n"
+        # -----------------------------
+        # CATEGORY EXTRACTION
+        # First noun-like word after "a" or "an"
+        # -----------------------------
+        category_match = re.search(r"\b(a|an)\s+([a-zA-Z\s]+?)(?:\.|,|\s)", user_text.lower())
+        category = None
+        if category_match:
+            category = category_match.group(2).split()[0].capitalize()
 
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {
-                "role": "user",
-                "content": f"Here is the conversation:\n\n{conversation_text}\n\nGenerate the final structured description."
-            }
+        # Fallback: first meaningful word
+        if not category:
+            words = user_text.split()
+            if words:
+                category = words[0].capitalize()
+
+        # -----------------------------
+        # COLOR DETECTION
+        # -----------------------------
+        common_colors = [
+            "black", "white", "blue", "red", "green",
+            "yellow", "pink", "purple", "brown",
+            "gold", "rose gold", "silver", "grey"
         ]
 
-        print("Messages Sent To OpenRouter:")
-        print(messages)
+        color_found = []
+        for color in common_colors:
+            if color in user_text.lower():
+                color_found.append(color.title())
 
-        # ===== API CALL =====
-        response = requests.post(
-            "https://openrouter.ai/api/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-                "Content-Type": "application/json"
-            },
-            json={
-                "model": "mistralai/mistral-7b-instruct",
-                "messages": messages,
-                "temperature": 0.5,
-                "max_tokens": 200
-            },
-            timeout=30
+        # -----------------------------
+        # MATERIAL DETECTION
+        # -----------------------------
+        materials = [
+            "leather", "metal", "plastic", "gold",
+            "silver", "cotton", "denim", "wood",
+            "glass", "crystal", "rubber"
+        ]
+
+        material_found = []
+        for material in materials:
+            if material in user_text.lower():
+                material_found.append(material.title())
+
+        # -----------------------------
+        # SIZE / SHAPE
+        # -----------------------------
+        size_words = ["small", "large", "big", "tiny", "mini", "dainty"]
+        size_found = []
+        for word in size_words:
+            if word in user_text.lower():
+                size_found.append(word.capitalize())
+
+        # -----------------------------
+        # LOCATION EXTRACTION
+        # -----------------------------
+        location = None
+        location_match = re.search(
+            r"(last saw it|last seen|lost it|left it)\s+(in|at)\s+([a-zA-Z0-9\s]+)",
+            user_text.lower()
         )
+        if location_match:
+            location = location_match.group(3).strip().capitalize()
 
-        print("OpenRouter Status Code:", response.status_code)
+        # -----------------------------
+        # BUILD FINAL DESCRIPTION
+        # -----------------------------
+        description_parts = []
 
-        if response.status_code != 200:
-            print("OpenRouter HTTP Error:", response.text)
-            return {"final_description": "AI service error. Try again."}
+        if category:
+            description_parts.append(f"Category: {category}.")
 
-        result = response.json()
-        print("OpenRouter Raw Response:", result)
+        if color_found:
+            description_parts.append(f"Color: {', '.join(color_found)}.")
 
-        if "choices" not in result or not result["choices"]:
-            print("Invalid OpenRouter response structure.")
-            return {"final_description": "AI temporarily unavailable."}
+        if material_found:
+            description_parts.append(f"Material: {', '.join(material_found)}.")
 
-        final_text = result["choices"][0]["message"]["content"]
+        if size_found:
+            description_parts.append(f"Size/Appearance: {', '.join(size_found)}.")
 
-        if final_text:
-            final_text = final_text.strip()
+        if location:
+            description_parts.append(f"Last seen at: {location}.")
 
-        if not final_text:
-            print("Model returned empty content.")
-            final_text = "Description could not be generated. Please try again."
+        final_description = " ".join(description_parts)
 
-        print("Final Description Generated:", final_text)
+        if not final_description:
+            final_description = "Insufficient details provided to generate description."
 
-        return {"final_description": final_text}
+        return {"final_description": final_description}
 
     except Exception as e:
         print("Finalize Endpoint Error:", str(e))
         return {"final_description": "Something went wrong."}
+# @app.post("/api/detective/finalize")
+# def finalize_description(data: FinalizeRequest):
+#     try:
+#         history = data.history
+
+#         if not history:
+#             print("Finalize Debug: No history received.")
+#             return {"final_description": "No conversation data provided."}
+
+#         # ===== SYSTEM PROMPT =====
+#         system_prompt = """
+# You are generating a final structured item description.
+
+# Based ONLY on information mentioned in the conversation,
+# write a detailed physical description of the lost item.
+
+# Include:
+# - Category
+# - Color
+# - Material (if mentioned)
+# - Shape (if mentioned)
+# - Distinctive features (if mentioned)
+
+# Do NOT ask questions.
+# Do NOT invent details.
+# Return only the description paragraph.
+# """
+
+#         # ===== Convert Entire Conversation To ONE User Message =====
+#         conversation_text = ""
+
+#         for h in history:
+#             role = h.get("role", "")
+#             content = h.get("content", "")
+
+#             print(f"History -> Role: {role}, Content: {content}")
+
+#             conversation_text += f"{role.upper()}: {content}\n"
+
+#         messages = [
+#             {"role": "system", "content": system_prompt},
+#             {
+#                 "role": "user",
+#                 "content": f"Here is the conversation:\n\n{conversation_text}\n\nGenerate the final structured description."
+#             }
+#         ]
+
+#         print("Messages Sent To OpenRouter:")
+#         print(messages)
+
+#         # ===== API CALL =====
+#         response = requests.post(
+#             "https://openrouter.ai/api/v1/chat/completions",
+#             headers={
+#                 "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+#                 "Content-Type": "application/json"
+#             },
+#             json={
+#                 "model": "google/gemma-3-12b-it:free",
+#                 "messages": messages,
+#                 "temperature": 0.5,
+#                 "max_tokens": 200
+#             },
+#             timeout=30
+#         )
+
+#         print("OpenRouter Status Code:", response.status_code)
+
+#         if response.status_code != 200:
+#             print("OpenRouter HTTP Error:", response.text)
+#             return {"final_description": "AI service error. Try again."}
+
+#         result = response.json()
+#         print("OpenRouter Raw Response:", result)
+
+#         if "choices" not in result or not result["choices"]:
+#             print("Invalid OpenRouter response structure.")
+#             return {"final_description": "AI temporarily unavailable."}
+
+#         final_text = result["choices"][0]["message"]["content"]
+
+#         if final_text:
+#             final_text = final_text.strip()
+
+#         if not final_text:
+#             print("Model returned empty content.")
+#             final_text = "Description could not be generated. Please try again."
+
+#         print("Final Description Generated:", final_text)
+
+#         return {"final_description": final_text}
+
+#     except Exception as e:
+#         print("Finalize Endpoint Error:", str(e))
+#         return {"final_description": "Something went wrong."}
 
 

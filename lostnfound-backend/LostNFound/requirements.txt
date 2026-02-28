@@ -10,3 +10,5 @@ huggingface_hub
 python-dotenv
 python-multipart
 numpy
+PyJWT
+qrcode[pil]
