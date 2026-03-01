@@ -34,7 +34,7 @@ def generate_verification_questions(lost_description: str, found_caption: str) -
                 "Content-Type": "application/json"
             },
             json={
-                "model": "mistralai/mistral-7b-instruct",
+                "model": "google/gemma-7b-it:free",
                 "messages": [
                     {"role": "system", "content": system_prompt.format(lost_description=lost_description, found_caption=found_caption)}
                 ],

@@ -1,5 +1,7 @@
 import os
 import time
+
+from overrides import final
 from fastapi import FastAPI, UploadFile, File, Form
 from database import Base, engine, SessionLocal
 from models import LostItem, FoundItem, DetectiveRequest, FinalizeRequest, Match, Verification
@@ -22,6 +24,8 @@ from qr_utility import generate_signed_qr
 import uuid
 import shutil
 from fastapi import HTTPException
+from compare_items import text_similarity, image_similarity, text_image_similarity
+from datetime import datetime
 
 
 from dotenv import load_dotenv
@@ -86,7 +90,7 @@ def add_lost(description: str = Form(...), email: str = Form(...)):
     add_to_vector_db(lost.id, embedding)
 
     # Trigger matching
-    match_found = check_for_matches(lost.id, embedding, is_lost=True)
+    match_found = check_for_matches(lost.id, is_lost=True)
 
     db.close()
 
@@ -135,7 +139,7 @@ def add_found(
     add_to_vector_db(found.id, query_embedding, is_lost=False)
 
     # Matching logic for found items
-    match_found = check_for_matches(found.id, query_embedding, is_lost=False)
+    match_found = check_for_matches(found.id, is_lost=False)
 
     db.close()
 
@@ -164,68 +168,150 @@ def get_found_items():
     db.close()
     return result
 
-def check_for_matches(item_id, embedding, is_lost=True):
+def get_text_representation(item, is_lost):
+    """
+    Returns unified text representation for similarity comparison.
+    LostItem -> description
+    FoundItem -> caption + location + condition
+    """
+
+    if is_lost:
+        return item.description or ""
+    else:
+        return f"{item.caption or ''} {item.location or ''} {item.condition or ''}".strip()
+
+
+def check_for_matches(item_id, is_lost=True):
     db = SessionLocal()
     match_found = False
-    
+
     try:
-        # If is_lost=True (new lost item), search FOUND collection (search_lost=False)
-        # If is_lost=False (new found item), search LOST collection (search_lost=True)
-        results = search_vector_db(embedding, search_lost=(not is_lost))
-        
-        if not results["ids"] or not results["ids"][0]:
+        # -------------------------------------------------
+        # Get current item and candidates
+        # -------------------------------------------------
+        if is_lost:
+            current_item = db.query(LostItem).filter(LostItem.id == item_id).first()
+            candidates = db.query(FoundItem).filter(FoundItem.matched == 0).all()
+        else:
+            current_item = db.query(FoundItem).filter(FoundItem.id == item_id).first()
+            candidates = db.query(LostItem).filter(LostItem.matched == 0).all()
+
+        if not current_item:
+            print("No current item found.")
             return False
 
-        for i in range(len(results["ids"][0])):
-            distance = results["distances"][0][i]
-            matched_id = int(results["ids"][0][i])
-            similarity = 1 - distance
-            
-            if similarity >= 0.6:
-                # We have a potential match!
-                if is_lost:
-                    # We just added a lost item, matched_id is a found item
-                    lost_item = db.query(LostItem).filter(LostItem.id == item_id).first()
-                    found_item = db.query(FoundItem).filter(FoundItem.id == matched_id).first()
-                else:
-                    # We just added a found item, matched_id is a lost item
-                    lost_item = db.query(LostItem).filter(LostItem.id == matched_id).first()
-                    found_item = db.query(FoundItem).filter(FoundItem.id == item_id).first()
+        # -------------------------------------------------
+        # Matching Loop
+        # -------------------------------------------------
+        for candidate in candidates:
 
-                if lost_item and found_item:
-                    # Check if match already exists
-                    existing_match = db.query(Match).filter(
-                        Match.lost_item_id == lost_item.id,
-                        Match.found_item_id == found_item.id
-                    ).first()
-                    
-                    if not existing_match:
-                        lost_item.matched = 1
-                        found_item.matched = 1
-                        
-                        new_match = Match(
-                            lost_item_id=lost_item.id,
-                            found_item_id=found_item.id,
-                            similarity_score=int(similarity * 100),
-                            created_at=datetime.now().isoformat()
-                        )
-                        db.add(new_match)
-                        db.commit()
-                        db.refresh(new_match)
-                        
-                        send_match_email(lost_item.email, lost_item, found_item, new_match.id)
-                        match_found = True
-                    else:
-                        # Existing match found, we skip creating a new one and sending email
-                        # But we still mark match_found as True for the response if needed
-                        # (The request asks to send email ONLY when a new match is created)
-                        match_found = True
-                        
+            # TEXT similarity
+            if is_lost:
+                text1 = current_item.description or ""
+                text2 = get_text_representation(candidate, False)
+            else:
+                text1 = get_text_representation(current_item, False)
+                text2 = candidate.description or ""
+
+            s1 = text_similarity(text1, text2)
+
+            # IMAGE similarity
+            try:
+                if os.path.exists(current_item.image_path) and os.path.exists(candidate.image_path):
+                    s2 = image_similarity(
+                        current_item.image_path,
+                        candidate.image_path
+                    )
+                else:
+                    print("⚠ Image file missing. Skipping image similarity.")
+                    s2 = 0
+            except Exception as img_error:
+                print(f"Image similarity error: {img_error}")
+                s2 = 0
+
+            # CROSS similarity
+# CROSS similarity
+            try:
+                if os.path.exists(candidate.image_path):
+                    s3 = text_image_similarity(
+                        text1,
+                        candidate.image_path
+                    )
+                else:
+                    print("⚠ Candidate image missing. Skipping cross similarity.")
+                    s3 = 0
+            except Exception as cross_error:
+                print(f"Cross similarity error: {cross_error}")
+                s3 = 0
+
+            # FINAL score
+            final_score = (0.4 * s1) + (0.4 * s2) + (0.2 * s3)
+
+            print("\n-----------------------------------")
+            print(f"Comparing with Candidate ID: {candidate.id}")
+            print(f"Text Similarity: {s1:.3f}")
+            print(f"Image Similarity: {s2:.3f}")
+            print(f"Cross Similarity: {s3:.3f}")
+            print(f"Final Score: {final_score:.3f}")
+            print("-----------------------------------")
+
+            # -------------------------------------------------
+            # If match threshold passed
+            # -------------------------------------------------
+            if final_score >= 0.6:
+
+                if is_lost:
+                    lost_item = current_item
+                    found_item = candidate
+                else:
+                    lost_item = candidate
+                    found_item = current_item
+
+                # Check if match already exists
+                existing_match = db.query(Match).filter(
+                    Match.lost_item_id == lost_item.id,
+                    Match.found_item_id == found_item.id
+                ).first()
+
+                if not existing_match:
+
+                    lost_item.matched = 1
+                    found_item.matched = 1
+
+                    new_match = Match(
+                        lost_item_id=lost_item.id,
+                        found_item_id=found_item.id,
+                        similarity_score=int(final_score * 100),
+                        created_at=datetime.now().isoformat()
+                    )
+
+                    db.add(new_match)
+                    db.commit()
+                    db.refresh(new_match)
+
+                    print(f"✅ Match created! Match ID: {new_match.id}")
+
+                    # Send email safely
+                    try:
+                        if lost_item.email:
+                            send_match_email(
+                                lost_item.email,
+                                lost_item,
+                                found_item,
+                                new_match.id
+                            )
+                            print("📧 Email sent.")
+                    except Exception as email_error:
+                        print(f"Email sending failed: {email_error}")
+
+                match_found = True
+
     except Exception as e:
         print(f"Matching error: {e}")
+
     finally:
         db.close()
-        
+
     return match_found
 
 def send_match_email(to_email, lost_item, found_item, match_id):

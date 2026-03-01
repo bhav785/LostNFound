@@ -71,7 +71,7 @@ if __name__ == "__main__":
 
         final = (0.4 * s1) + (0.4 * s2) + (0.2 * s3)
         print(f"\nScores -> Text: {s1:.3f}, Image: {s2:.3f}, Cross: {s3:.3f}")
-        print(f"🔥 Final Match Score: {final:.3f}")
+        print(f" Final Match Score: {final:.3f}")
         
     except Exception as e:
         print(f"Error: {e}")
