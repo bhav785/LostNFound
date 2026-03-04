@@ -1,5 +1,6 @@
 import os
 import time
+from urllib import response
 
 from overrides import final
 from fastapi import FastAPI, UploadFile, File, Form
@@ -26,9 +27,15 @@ import shutil
 from fastapi import HTTPException
 from compare_items import text_similarity, image_similarity, text_image_similarity
 from datetime import datetime
-
-
+from fastapi import FastAPI, HTTPException
+import google.generativeai as genai
 from dotenv import load_dotenv
+
+genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+
+model = genai.GenerativeModel("gemini-2.5-flash")
+
+
 load_dotenv()
 Base.metadata.create_all(bind=engine)
 
@@ -36,7 +43,7 @@ app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allow all for development integration
+    allow_origins=["*"],  
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -186,9 +193,7 @@ def check_for_matches(item_id, is_lost=True):
     match_found = False
 
     try:
-        # -------------------------------------------------
-        # Get current item and candidates
-        # -------------------------------------------------
+       
         if is_lost:
             current_item = db.query(LostItem).filter(LostItem.id == item_id).first()
             candidates = db.query(FoundItem).filter(FoundItem.matched == 0).all()
@@ -289,7 +294,7 @@ def check_for_matches(item_id, is_lost=True):
                     db.commit()
                     db.refresh(new_match)
 
-                    print(f"✅ Match created! Match ID: {new_match.id}")
+                    print(f"Match created! Match ID: {new_match.id}")
 
                     # Send email safely
                     try:
@@ -300,7 +305,7 @@ def check_for_matches(item_id, is_lost=True):
                                 found_item,
                                 new_match.id
                             )
-                            print("📧 Email sent.")
+                            print(" Email sent.")
                     except Exception as email_error:
                         print(f"Email sending failed: {email_error}")
 
@@ -524,46 +529,12 @@ def verify_match(match_id: int):
     return result
 
 
-def call_openrouter(payload, retries=3):
-    url = "https://openrouter.ai/api/v1/chat/completions"
-
-    headers = {
-        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-        "Content-Type": "application/json"
-    }
-
-    for attempt in range(retries):
-        try:
-            response = requests.post(
-                url,
-                headers=headers,
-                json=payload,
-                timeout=30
-            )
-
-            if response.status_code == 200:
-                return response.json()
-
-            # If model not available or provider error → retry
-            if response.status_code >= 500:
-                time.sleep(2 ** attempt)
-                continue
-
-            # For 4xx errors → stop immediately
-            raise HTTPException(
-                status_code=response.status_code,
-                detail=response.json()
-            )
-
-        except requests.exceptions.RequestException:
-            time.sleep(2 ** attempt)
-
-    raise HTTPException(status_code=500, detail="Model failed after retries")
 
 
-# -----------------------------
-# Main Endpoint
-# -----------------------------
+
+
+
+
 @app.post("/api/detective")
 def detective(data: DetectiveRequest):
 
@@ -571,95 +542,63 @@ def detective(data: DetectiveRequest):
     user_input = data.userInput or ""
 
     system_prompt = """
-You are Sherlock, a detective helping users describe lost items on lostNfound.
+You are Sherlock, helping describe lost items.
+
+Ask ONE short question to clarify the item.
+
+Return JSON only:
+{
+"text":"question",
+"tags":["tag1","tag2"],
+"confidenceDelta":5
+}
 
 Rules:
-- Ask ONE short question.
-- Extract 1-2 tags.
-- Estimate confidenceDelta (1-10).
-
-Respond ONLY in JSON:
-{
-  "text": "...",
-  "tags": ["..."],
-  "confidenceDelta": 5
-}
+- text ≤15 words
+- tags = 1-2 keywords
+- no explanation
 """
 
-    # Merge system + conversation + user into ONE user message
-    conversation = "\n".join([h.get("content", "") for h in history])
+    conversation = "\n".join([h.get("content","") for h in history[-3:]])
 
-    combined_prompt = f"""
+    prompt = f"""
 {system_prompt}
 
-Conversation so far:
+Conversation:
 {conversation}
 
 User:
 {user_input}
 """
 
-    primary_model = "google/gemma-7b-it:free"
-    fallback_model = "openrouter/free"
-
-    payload = {
-        "model": primary_model,
-        "messages": [
-            {"role": "user", "content": combined_prompt}
-        ],
-        "temperature": 0.7,
-        "max_tokens": 200
-    }
-
-    # -----------------------------
-    # Try Primary Model
-    # -----------------------------
     try:
-        result = call_openrouter(payload)
-    except:
-        # Fallback model
-        payload["model"] = fallback_model
-        result = call_openrouter(payload)
-
-    if "choices" not in result:
-        raise HTTPException(status_code=500, detail="Invalid LLM response")
-
-    content = result["choices"][0]["message"]["content"]
-
-    # Remove markdown JSON wrappers if present
-    cleaned = re.sub(r"```json|```", "", content).strip()
-
-    if not cleaned:
-        raise HTTPException(
-            status_code=500,
-            detail="Model returned empty response"
-        )
-
-    # Try to extract JSON block if model added extra text
-    json_match = re.search(r"\{.*\}", cleaned, re.DOTALL)
-
-    if not json_match:
-        raise HTTPException(
-            status_code=500,
-            detail={
-                "error": "No JSON found in model response",
-                "raw_content": content
+        response = model.generate_content(
+            prompt,
+            generation_config={
+                "temperature": 0.4,
+                "max_output_tokens": 300,
+                "response_mime_type": "application/json"
             }
         )
 
-    json_text = json_match.group()
+        content = response.text.strip()
+        print("FULL RESPONSE OBJECT:", response)
+        print("TEXT:", response.text)
+        cleaned = re.sub(r"```json|```", "", content).strip()
 
-    try:
-        parsed = json.loads(json_text)
+        json_match = re.search(r"\{.*\}", cleaned, re.DOTALL)
+
+        if not json_match:
+            raise HTTPException(status_code=500, detail="No JSON returned")
+
+        parsed = json.loads(json_match.group())
+
         return parsed
-    except json.JSONDecodeError:
-        raise HTTPException(
-            status_code=500,
-            detail={
-                "error": "Invalid JSON format from model",
-                "raw_content": content
-            }
-        )
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 #no api based description generation
