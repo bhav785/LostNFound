@@ -4,57 +4,62 @@ import requests
 import re
 from datetime import datetime
 from typing import List, Dict
+import google.generativeai as genai
 
-# Mistral-7B via OpenRouter for generating questions
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+
+model = genai.GenerativeModel("gemini-2.5-flash")
+
 
 def generate_verification_questions(lost_description: str, found_caption: str) -> List[Dict]:
     """
-    Generates 3 contextual ownership verification questions based on the item description.
+    Generate 3 ownership verification questions using Gemini Flash.
+    Optimized for low token usage.
     """
-    system_prompt = """
-    You are a security protocol designer. Generate 3 specific, contextual questions to verify if a claimant is the rightful owner of a lost item.
-    
-    Lost Item Description: {lost_description}
-    Found Item Caption: {found_caption}
-    
-    Rules:
-    - Questions should be partially open-ended (e.g., 'What brand is it?') or multiple choice.
-    - Do NOT include the answers in the questions.
-    - Provide a 'correct_answer' for each question based on the lost item description.
-    - Format as JSON list of objects: [{"question": "...", "type": "text"|"choice", "options": ["..."]|null, "correct_answer": "..."}]
-    - Return ONLY the JSON.
-    """
-    
+
+    prompt = f"""
+Generate 3 ownership verification questions.
+
+Lost item: {lost_description}
+Found item: {found_caption}
+
+Return JSON only:
+[
+{{"question":"...","type":"text|choice","options":["..."]|null,"correct_answer":"..."}}
+]
+
+Rules:
+- questions must NOT reveal answers
+- options null for text
+- keep questions short
+"""
+
     try:
-        response = requests.post(
-            "https://openrouter.ai/api/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-                "Content-Type": "application/json"
-            },
-            json={
-                "model": "google/gemma-7b-it:free",
-                "messages": [
-                    {"role": "system", "content": system_prompt.format(lost_description=lost_description, found_caption=found_caption)}
-                ],
-                "temperature": 0.5
-            },
-            timeout=30
+        response = model.generate_content(
+            prompt,
+            generation_config={
+                "temperature": 0.4,
+                "max_output_tokens": 200
+            }
         )
-        
-        if response.status_code == 200:
-            content = response.json()["choices"][0]["message"]["content"]
-            cleaned = re.sub(r"```json|```", "", content).strip()
-            return json.loads(cleaned)
+
+        content = response.text.strip()
+
+        cleaned = re.sub(r"```json|```", "", content).strip()
+
+        json_match = re.search(r"\[.*\]", cleaned, re.DOTALL)
+
+        if json_match:
+            return json.loads(json_match.group())
+
     except Exception as e:
         print(f"Error generating questions: {e}")
-    
-    # Fallback questions if AI fails
+
+    # Fallback questions
     return [
-        {"question": "Can you specify the brand or any unique labels on the item?", "type": "text", "correct_answer": "any"},
-        {"question": "Where exactly (building/room/landmark) did you lose it?", "type": "text", "correct_answer": "any"},
-        {"question": "What is the primary color and material of the item?", "type": "text", "correct_answer": "any"}
+        {"question": "What brand or logo is on the item?", "type": "text", "options": None, "correct_answer": "any"},
+        {"question": "Where did you lose the item?", "type": "text", "options": None, "correct_answer": "any"},
+        {"question": "What color is the item?", "type": "text", "options": None, "correct_answer": "any"}
     ]
 
 def calculate_confidence_score(user_answers: List[Dict], actual_questions: List[Dict], proof_files: List[str], metadata: Dict) -> Dict:
